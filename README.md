@@ -22,6 +22,10 @@ https://github.com/imogendes/make-an-offer/raw/main/demo.mp4
 ## Contents
 
 - `demo.mp4`: the animated demo of the full flow
-- Screens and the Telegram iOS implementation patch are coming next
+- `make-an-offer.patch`: the implementation patch for [Telegram-iOS](https://github.com/TelegramMessenger/Telegram-iOS)
+- `submodules/` and `Telegram/`: the changed source files from the patch, for easy reading
+- [IMPLEMENTATION.md](IMPLEMENTATION.md): how the patch works, how to test it, and two small API suggestions
+
+To try it, apply the patch to a Telegram-iOS checkout with `git apply make-an-offer.patch`. It was written against the current source but hasn't been built locally yet.
 
 Suggested by [@imogen](https://t.me/imogen)

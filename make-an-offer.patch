@@ -1,0 +1,1321 @@
+From 0d7db4b7dacac2855b69161cb039b855689acea4 Mon Sep 17 00:00:00 2001
+From: Imogen <imogenono@gmail.com>
+Date: Sun, 11 Oct 2026 23:02:39 +0100
+Subject: [PATCH] Wallet: Make an Offer on recipient's gifts from Send Money
+ sheet
+
+Adds a 'Make an Offer' item to the Send Money menu when the recipient
+shows collectible gifts that accept offers. Picking a gift reuses the
+amount keypad to name a GRAM price and sends it through the existing
+payments.sendStarGiftOffer method. Offer service bubbles get a status
+ribbon (offer / sold / declined / expired).
+---
+ .../Telegram-iOS/en.lproj/Localizable.strings |  17 +
+ ...hatMessageGiftOfferBubbleContentNode.swift |   8 +
+ .../Components/Wallet/WalletSendScreen/BUILD  |   3 +
+ .../Sources/WalletSendGiftOffer.swift         | 658 ++++++++++++++++++
+ .../Sources/WalletSendScreen.swift            | 409 ++++++++++-
+ 5 files changed, 1076 insertions(+), 19 deletions(-)
+ create mode 100644 submodules/TelegramUI/Components/Wallet/WalletSendScreen/Sources/WalletSendGiftOffer.swift
+
+diff --git a/Telegram/Telegram-iOS/en.lproj/Localizable.strings b/Telegram/Telegram-iOS/en.lproj/Localizable.strings
+index 5c82abe..1ba7661 100644
+--- a/Telegram/Telegram-iOS/en.lproj/Localizable.strings
++++ b/Telegram/Telegram-iOS/en.lproj/Localizable.strings
+@@ -17096,3 +17096,20 @@ Error: %8$@";
+ "Notification.GramTransfer.UnknownUser" = "UNKNOWN USER";
+ 
+ "Chat.ViewStyle" = "VIEW STYLE";
++
++"Wallet.Send.MakeOffer" = "Make an Offer";
++"Wallet.Send.MakeOffer.New" = "NEW";
++"Wallet.Send.Offer.Title" = "Make an Offer";
++"Wallet.Send.Offer.GiftsOnProfile" = "GIFTS ON PROFILE";
++"Wallet.Send.Offer.PickHint" = "Pick a gift, then name your price in GRAM.";
++"Wallet.Send.Offer.OnlyVisibleGifts" = "Only gifts shown on %@'s profile appear here.";
++"Wallet.Send.Offer.OfferOnGift" = "Offer on %@";
++"Wallet.Send.Offer.PickGift" = "Select a Gift";
++"Wallet.Send.Offer.OfferAmount" = "Offer %@";
++"Wallet.Send.Offer.OwnedBy" = "Owned by";
++"Wallet.Send.Offer.EscrowNote" = "Offer expires in 24 h · GRAM is held until %@ replies";
++"Wallet.Send.Offer.Error" = "Couldn't send your offer. Please try again.";
++"Notification.StarGiftOffer.Ribbon.Offer" = "offer";
++"Notification.StarGiftOffer.Ribbon.Sold" = "sold";
++"Notification.StarGiftOffer.Ribbon.Declined" = "declined";
++"Notification.StarGiftOffer.Ribbon.Expired" = "expired";
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageGiftOfferBubbleContentNode/Sources/ChatMessageGiftOfferBubbleContentNode.swift b/submodules/TelegramUI/Components/Chat/ChatMessageGiftOfferBubbleContentNode/Sources/ChatMessageGiftOfferBubbleContentNode.swift
+index 047af9e..f931736 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageGiftOfferBubbleContentNode/Sources/ChatMessageGiftOfferBubbleContentNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageGiftOfferBubbleContentNode/Sources/ChatMessageGiftOfferBubbleContentNode.swift
+@@ -110,6 +110,9 @@ public class ChatMessageGiftOfferBubbleContentNode: ChatMessageBubbleContentNode
+             return (contentProperties, nil, CGFloat.greatestFiniteMagnitude, { [weak self] constrainedSize, position in
+                 var giftSize = CGSize(width: 260.0, height: 240.0)
+                 var uniqueGift: StarGift.UniqueGift?
++                var statusRibbon: GiftItemComponent.Ribbon?
++                // Neutral grey reads well under the always-white ribbon text and sits on any gift backdrop.
++                let neutralRibbonColor: GiftItemComponent.Ribbon.Color = .custom(Int32(bitPattern: 0x8e8e93), Int32(bitPattern: 0x8e8e93))
+                 
+                 let incoming: Bool
+                 if item.message.id.peerId == item.context.account.peerId && item.message.forwardInfo == nil {
+@@ -152,9 +155,12 @@ public class ChatMessageGiftOfferBubbleContentNode: ChatMessageBubbleContentNode
+                     
+                     if isAccepted {
+                         additionalText = item.presentationData.strings.Notification_StarGiftOffer_Status_Accepted
++                        statusRibbon = GiftItemComponent.Ribbon(text: item.presentationData.strings.Notification_StarGiftOffer_Ribbon_Sold, color: .green)
+                     } else if isDeclined {
+                         additionalText = item.presentationData.strings.Notification_StarGiftOffer_Status_Rejected
++                        statusRibbon = GiftItemComponent.Ribbon(text: item.presentationData.strings.Notification_StarGiftOffer_Ribbon_Declined, color: neutralRibbonColor)
+                     } else if expireDate > currentTimestamp {
++                        statusRibbon = GiftItemComponent.Ribbon(text: item.presentationData.strings.Notification_StarGiftOffer_Ribbon_Offer, color: neutralRibbonColor)
+                         func textForTimeout(_ value: Int32) -> String {
+                             if value < 3600 {
+                                 let minutes = value / 60
+@@ -173,6 +179,7 @@ public class ChatMessageGiftOfferBubbleContentNode: ChatMessageBubbleContentNode
+                         }
+                     } else {
+                         additionalText = item.presentationData.strings.Notification_StarGiftOffer_Status_Expired
++                        statusRibbon = GiftItemComponent.Ribbon(text: item.presentationData.strings.Notification_StarGiftOffer_Ribbon_Expired, color: neutralRibbonColor)
+                     }
+                 } else {
+                     text = ""
+@@ -265,6 +272,7 @@ public class ChatMessageGiftOfferBubbleContentNode: ChatMessageBubbleContentNode
+                                         strings: item.presentationData.strings,
+                                         peer: nil,
+                                         subject: .uniqueGift(gift: uniqueGift, price: nil),
++                                        ribbon: statusRibbon,
+                                         mode: .thumbnail
+                                     )),
+                                     environment: {},
+diff --git a/submodules/TelegramUI/Components/Wallet/WalletSendScreen/BUILD b/submodules/TelegramUI/Components/Wallet/WalletSendScreen/BUILD
+index 9eecced..c0445d9 100644
+--- a/submodules/TelegramUI/Components/Wallet/WalletSendScreen/BUILD
++++ b/submodules/TelegramUI/Components/Wallet/WalletSendScreen/BUILD
+@@ -66,6 +66,9 @@ swift_library(
+         "//submodules/PasscodeCore",
+         "//submodules/TelegramUI/Components/Wallet/WalletAuthorizationUI",
+         "//submodules/UndoUI",
++        "//submodules/TelegramUI/Components/Gifts/GiftItemComponent",
++        "//submodules/TelegramUI/Components/Stars/BalanceNeededScreen",
++        "//submodules/TelegramUI/Components/Chat/ChatMessagePaymentAlertController",
+     ],
+     visibility = [
+         "//visibility:public",
+diff --git a/submodules/TelegramUI/Components/Wallet/WalletSendScreen/Sources/WalletSendGiftOffer.swift b/submodules/TelegramUI/Components/Wallet/WalletSendScreen/Sources/WalletSendGiftOffer.swift
+new file mode 100644
+index 0000000..48848d1
+--- /dev/null
++++ b/submodules/TelegramUI/Components/Wallet/WalletSendScreen/Sources/WalletSendGiftOffer.swift
+@@ -0,0 +1,658 @@
++import Foundation
++import UIKit
++import Display
++import SwiftSignalKit
++import AccountContext
++import TelegramCore
++import TelegramPresentationData
++import TelegramStringFormatting
++import ComponentFlow
++import AvatarComponent
++import BundleIconComponent
++import MultilineTextComponent
++import PlainButtonComponent
++import GiftItemComponent
++
++// MARK: - Model
++
++/// Phase of the "Make an Offer" flow that lives inside the Send Money sheet.
++///
++/// `.none`        – regular GRAM transfer (existing behaviour).
++/// `.pickingGift` – the sheet shows the recipient's offerable collectible gifts.
++/// `.gift`        – a gift is chosen; the amount field / keypad are reused to name a price.
++enum WalletSendOfferPhase: Equatable {
++    case none
++    case pickingGift(selected: StarGift.UniqueGift?)
++    case gift(StarGift.UniqueGift)
++
++    var isActive: Bool {
++        if case .none = self {
++            return false
++        }
++        return true
++    }
++
++    var selectedGift: StarGift.UniqueGift? {
++        switch self {
++        case .none:
++            return nil
++        case let .pickingGift(selected):
++            return selected
++        case let .gift(gift):
++            return gift
++        }
++    }
++}
++
++/// A gift can receive an offer when it is a collectible owned by the recipient
++/// and the owner has not disabled offers (the server sends `offer_min_stars` only
++/// for gifts that accept offers – the same check `GiftViewScreen` uses for "Offer to Buy").
++func walletSendIsOfferable(_ gift: ProfileGiftsContext.State.StarGift, ownerId: EnginePeer.Id, accountPeerId: EnginePeer.Id) -> StarGift.UniqueGift? {
++    guard ownerId != accountPeerId, case let .unique(uniqueGift) = gift.gift else {
++        return nil
++    }
++    guard uniqueGift.minOfferStars != nil else {
++        return nil
++    }
++    if let owner = uniqueGift.owner, case let .peerId(ownerPeerId) = owner, ownerPeerId != ownerId {
++        return nil
++    }
++    return uniqueGift
++}
++
++/// How long an offer stays open. Matches "Offer expires in 24 h" in the design;
++/// can be overridden from the server with the `stargifts_offer_duration` app config key.
++func walletSendGiftOfferDuration(context: AccountContext) -> Int32 {
++    if let data = context.currentAppConfiguration.with({ $0 }).data, let value = data["stargifts_offer_duration"] as? Double, value > 0.0 {
++        return Int32(value)
++    }
++    return 24 * 60 * 60
++}
++
++/// Loads the recipient's displayed collectible gifts and keeps only the ones that can receive offers.
++/// The "Make an Offer" menu item is shown only when this list is non-empty.
++final class WalletSendOfferableGiftsLoader {
++    struct State: Equatable {
++        var gifts: [StarGift.UniqueGift]
++        var isLoaded: Bool
++    }
++
++    private let profileGifts: ProfileGiftsContext
++    private let disposable = MetaDisposable()
++    private(set) var state = State(gifts: [], isLoaded: false)
++    var updated: ((State) -> Void)?
++
++    init(context: AccountContext, peerId: EnginePeer.Id) {
++        self.profileGifts = ProfileGiftsContext(
++            account: context.account,
++            peerId: peerId,
++            sorting: .value,
++            filter: [.unique, .displayed]
++        )
++        let accountPeerId = context.account.peerId
++        self.disposable.set((self.profileGifts.state
++        |> map { state -> State in
++            let gifts = state.filteredGifts.compactMap { walletSendIsOfferable($0, ownerId: peerId, accountPeerId: accountPeerId) }
++            var isLoaded = false
++            if case .ready = state.dataState {
++                isLoaded = true
++            }
++            return State(gifts: gifts, isLoaded: isLoaded)
++        }
++        |> distinctUntilChanged
++        |> deliverOnMainQueue).start(next: { [weak self] state in
++            guard let self else {
++                return
++            }
++            self.state = state
++            self.updated?(state)
++        }))
++    }
++
++    deinit {
++        self.disposable.dispose()
++    }
++
++    func loadMore() {
++        self.profileGifts.loadMore()
++    }
++}
++
++/// Sends the offer through the existing `payments.sendStarGiftOffer` method with a GRAM (TON) price,
++/// handling paid-message recipients and an insufficient GRAM balance the same way `GiftViewScreen` does.
++enum WalletSendGiftOfferResult {
++    case sent
++    case needsPaidMessageConfirmation(StarsAmount)
++    case insufficientBalance(needed: StarsAmount)
++    case failed
++}
++
++func walletSendCommitGiftOffer(
++    context: AccountContext,
++    peer: EnginePeer,
++    gift: StarGift.UniqueGift,
++    amountNanograms: Int64,
++    comment: String?,
++    allowPaidStars: Int64?
++) -> Signal<WalletSendGiftOfferResult, NoError> {
++    let price = CurrencyAmount(amount: StarsAmount(value: amountNanograms, nanos: 0), currency: .ton)
++
++    if let tonState = context.tonContext?.currentState, tonState.balance < price.amount {
++        return .single(.insufficientBalance(needed: price.amount - tonState.balance))
++    }
++
++    return context.engine.data.get(TelegramEngine.EngineData.Item.Peer.SendPaidMessageStars(id: peer.id))
++    |> mapToSignal { sendPaidMessageStars -> Signal<WalletSendGiftOfferResult, NoError> in
++        if let sendPaidMessageStars, sendPaidMessageStars.value > 0, allowPaidStars == nil {
++            return .single(.needsPaidMessageConfirmation(sendPaidMessageStars))
++        }
++        let sendOffer = Signal<WalletSendGiftOfferResult, NoError> { subscriber in
++            return context.engine.payments.sendStarGiftOffer(
++                peerId: peer.id,
++                slug: gift.slug,
++                amount: price,
++                duration: walletSendGiftOfferDuration(context: context),
++                allowPaidStars: allowPaidStars
++            ).start(error: { _ in
++                subscriber.putNext(.failed)
++                subscriber.putCompletion()
++            }, completed: {
++                subscriber.putNext(.sent)
++                subscriber.putCompletion()
++            })
++        }
++        return sendOffer
++        |> mapToSignal { result -> Signal<WalletSendGiftOfferResult, NoError> in
++            // `messageActionStarGiftPurchaseOffer` has no text field yet, so the optional
++            // comment is delivered as a regular message right after the offer card.
++            // (See PROPOSAL.md – a `message` field on the action would let the card show it inline.)
++            guard case .sent = result, let comment = comment?.trimmingCharacters(in: .whitespacesAndNewlines), !comment.isEmpty else {
++                return .single(result)
++            }
++            return enqueueMessages(account: context.account, peerId: peer.id, messages: [
++                .message(text: comment, attributes: [], inlineStickers: [:], mediaReference: nil, threadId: nil, replyToMessageId: nil, replyToStoryId: nil, localGroupingKey: nil, correlationId: nil, bubbleUpEmojiOrStickersets: [])
++            ])
++            |> map { _ -> WalletSendGiftOfferResult in
++                return .sent
++            }
++        }
++    }
++}
++
++private func giftRibbon(for gift: StarGift.UniqueGift, dateTimeFormat: PresentationDateTimeFormat) -> GiftItemComponent.Ribbon {
++    var ribbonColor: GiftItemComponent.Ribbon.Color = .blue
++    for attribute in gift.attributes {
++        if case let .backdrop(_, _, innerColor, outerColor, _, _, _) = attribute {
++            ribbonColor = .custom(outerColor, innerColor)
++            break
++        }
++    }
++    return GiftItemComponent.Ribbon(text: "#\(formatCollectibleNumber(gift.number, dateTimeFormat: dateTimeFormat))", font: .monospaced, color: ribbonColor, outline: nil)
++}
++
++// MARK: - Gift picker ("GIFTS ON PROFILE" grid)
++
++final class WalletSendGiftPickerComponent: Component {
++    let context: AccountContext
++    let theme: PresentationTheme
++    let strings: PresentationStrings
++    let dateTimeFormat: PresentationDateTimeFormat
++    let peer: EnginePeer
++    let gifts: [StarGift.UniqueGift]
++    let isLoading: Bool
++    let selectedGiftId: Int64?
++    let selectGift: (StarGift.UniqueGift) -> Void
++    let loadMore: () -> Void
++
++    init(
++        context: AccountContext,
++        theme: PresentationTheme,
++        strings: PresentationStrings,
++        dateTimeFormat: PresentationDateTimeFormat,
++        peer: EnginePeer,
++        gifts: [StarGift.UniqueGift],
++        isLoading: Bool,
++        selectedGiftId: Int64?,
++        selectGift: @escaping (StarGift.UniqueGift) -> Void,
++        loadMore: @escaping () -> Void
++    ) {
++        self.context = context
++        self.theme = theme
++        self.strings = strings
++        self.dateTimeFormat = dateTimeFormat
++        self.peer = peer
++        self.gifts = gifts
++        self.isLoading = isLoading
++        self.selectedGiftId = selectedGiftId
++        self.selectGift = selectGift
++        self.loadMore = loadMore
++    }
++
++    static func ==(lhs: WalletSendGiftPickerComponent, rhs: WalletSendGiftPickerComponent) -> Bool {
++        if lhs.context !== rhs.context {
++            return false
++        }
++        if lhs.theme !== rhs.theme {
++            return false
++        }
++        if lhs.strings !== rhs.strings {
++            return false
++        }
++        if lhs.peer != rhs.peer {
++            return false
++        }
++        if lhs.gifts != rhs.gifts {
++            return false
++        }
++        if lhs.isLoading != rhs.isLoading {
++            return false
++        }
++        if lhs.selectedGiftId != rhs.selectedGiftId {
++            return false
++        }
++        return true
++    }
++
++    final class View: UIView, UIScrollViewDelegate {
++        private let header = ComponentView<Empty>()
++        private let counter = ComponentView<Empty>()
++        private let hint = ComponentView<Empty>()
++        private let footer = ComponentView<Empty>()
++        private let scrollView = UIScrollView()
++        private var items: [Int64: ComponentView<Empty>] = [:]
++
++        private var component: WalletSendGiftPickerComponent?
++
++        override init(frame: CGRect) {
++            super.init(frame: frame)
++
++            self.scrollView.delegate = self
++            self.scrollView.showsVerticalScrollIndicator = false
++            self.scrollView.alwaysBounceVertical = false
++            self.scrollView.contentInsetAdjustmentBehavior = .never
++            self.addSubview(self.scrollView)
++        }
++
++        required init?(coder: NSCoder) {
++            fatalError("init(coder:) has not been implemented")
++        }
++
++        func scrollViewDidScroll(_ scrollView: UIScrollView) {
++            if scrollView.contentOffset.y + scrollView.bounds.height > scrollView.contentSize.height - 120.0 {
++                self.component?.loadMore()
++            }
++        }
++
++        func update(component: WalletSendGiftPickerComponent, availableSize: CGSize, transition: ComponentTransition) -> CGSize {
++            self.component = component
++
++            let sideInset: CGFloat = 16.0
++            let headerFont = Font.regular(13.0)
++
++            let headerSize = self.header.update(
++                transition: .immediate,
++                component: AnyComponent(MultilineTextComponent(
++                    text: .plain(NSAttributedString(string: component.strings.Wallet_Send_Offer_GiftsOnProfile, font: headerFont, textColor: component.theme.list.freeTextColor)),
++                    maximumNumberOfLines: 1
++                )),
++                environment: {},
++                containerSize: CGSize(width: availableSize.width - sideInset * 4.0, height: 20.0)
++            )
++            let counterSize = self.counter.update(
++                transition: .immediate,
++                component: AnyComponent(MultilineTextComponent(
++                    text: .plain(NSAttributedString(string: "\(component.gifts.count)", font: headerFont, textColor: component.theme.list.freeTextColor)),
++                    maximumNumberOfLines: 1
++                )),
++                environment: {},
++                containerSize: CGSize(width: 80.0, height: 20.0)
++            )
++            if let headerView = self.header.view {
++                if headerView.superview == nil {
++                    self.addSubview(headerView)
++                }
++                headerView.frame = CGRect(origin: CGPoint(x: sideInset * 2.0, y: 0.0), size: headerSize)
++            }
++            if let counterView = self.counter.view {
++                if counterView.superview == nil {
++                    self.addSubview(counterView)
++                }
++                counterView.frame = CGRect(origin: CGPoint(x: availableSize.width - sideInset * 2.0 - counterSize.width, y: 0.0), size: counterSize)
++            }
++
++            // Same grid geometry as the profile Gifts tab / SelectCraftGiftScreen.
++            let itemSpacing: CGFloat = 10.0
++            let itemsInRow = availableSize.width > 480.0 ? 5 : 3
++            let itemWidth = floor((availableSize.width - sideInset * 2.0 - itemSpacing * CGFloat(itemsInRow - 1)) / CGFloat(itemsInRow))
++            let itemSize = CGSize(width: itemWidth, height: itemWidth)
++
++            let gridOriginY = headerSize.height + 8.0
++            let rows = max(1, Int(ceil(Double(component.gifts.count) / Double(itemsInRow))))
++            let gridHeight = CGFloat(rows) * itemSize.height + CGFloat(rows - 1) * itemSpacing
++            let maxGridHeight = max(itemSize.height, availableSize.height - gridOriginY - 96.0)
++            let visibleGridHeight = min(gridHeight, maxGridHeight)
++
++            transition.setFrame(view: self.scrollView, frame: CGRect(x: 0.0, y: gridOriginY, width: availableSize.width, height: visibleGridHeight))
++            self.scrollView.contentSize = CGSize(width: availableSize.width, height: gridHeight)
++
++            var validIds = Set<Int64>()
++            for (index, gift) in component.gifts.enumerated() {
++                validIds.insert(gift.id)
++                let row = index / itemsInRow
++                let column = index % itemsInRow
++                let itemFrame = CGRect(
++                    x: sideInset + CGFloat(column) * (itemSize.width + itemSpacing),
++                    y: CGFloat(row) * (itemSize.height + itemSpacing),
++                    width: itemSize.width,
++                    height: itemSize.height
++                )
++
++                var itemTransition = transition
++                let item: ComponentView<Empty>
++                if let current = self.items[gift.id] {
++                    item = current
++                } else {
++                    item = ComponentView()
++                    self.items[gift.id] = item
++                    itemTransition = .immediate
++                }
++                let _ = item.update(
++                    transition: itemTransition,
++                    component: AnyComponent(GiftItemComponent(
++                        context: component.context,
++                        style: .glass,
++                        theme: component.theme,
++                        strings: component.strings,
++                        peer: nil,
++                        subject: .uniqueGift(gift: gift, price: nil),
++                        ribbon: giftRibbon(for: gift, dateTimeFormat: component.dateTimeFormat),
++                        isSelected: component.selectedGiftId == gift.id,
++                        mode: .grid,
++                        action: { [weak self] in
++                            guard let self, let component = self.component else {
++                                return
++                            }
++                            HapticFeedback().impact(.light)
++                            component.selectGift(gift)
++                        }
++                    )),
++                    environment: {},
++                    containerSize: itemSize
++                )
++                if let itemView = item.view {
++                    if itemView.superview == nil {
++                        self.scrollView.addSubview(itemView)
++                        if !transition.animation.isImmediate {
++                            itemView.layer.animateScale(from: 0.85, to: 1.0, duration: 0.3)
++                            itemView.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2)
++                        }
++                    }
++                    itemTransition.setFrame(view: itemView, frame: itemFrame)
++                }
++            }
++            for (id, item) in self.items where !validIds.contains(id) {
++                item.view?.removeFromSuperview()
++                self.items.removeValue(forKey: id)
++            }
++
++            let textFont = Font.regular(15.0)
++            let hintSize = self.hint.update(
++                transition: .immediate,
++                component: AnyComponent(MultilineTextComponent(
++                    text: .plain(NSAttributedString(string: component.strings.Wallet_Send_Offer_PickHint, font: textFont, textColor: component.theme.list.itemSecondaryTextColor)),
++                    horizontalAlignment: .center,
++                    maximumNumberOfLines: 2
++                )),
++                environment: {},
++                containerSize: CGSize(width: availableSize.width - sideInset * 4.0, height: 60.0)
++            )
++            let hintFrame = CGRect(x: floorToScreenPixels((availableSize.width - hintSize.width) / 2.0), y: gridOriginY + visibleGridHeight + 28.0, width: hintSize.width, height: hintSize.height)
++            if let hintView = self.hint.view {
++                if hintView.superview == nil {
++                    self.addSubview(hintView)
++                }
++                transition.setFrame(view: hintView, frame: hintFrame)
++            }
++
++            let peerName = component.peer.compactDisplayTitle
++            let footerSize = self.footer.update(
++                transition: .immediate,
++                component: AnyComponent(MultilineTextComponent(
++                    text: .plain(NSAttributedString(string: component.strings.Wallet_Send_Offer_OnlyVisibleGifts(peerName).string, font: Font.regular(13.0), textColor: component.theme.list.freeTextColor)),
++                    horizontalAlignment: .center,
++                    maximumNumberOfLines: 2
++                )),
++                environment: {},
++                containerSize: CGSize(width: availableSize.width - sideInset * 4.0, height: 60.0)
++            )
++            let footerFrame = CGRect(x: floorToScreenPixels((availableSize.width - footerSize.width) / 2.0), y: hintFrame.maxY + 10.0, width: footerSize.width, height: footerSize.height)
++            if let footerView = self.footer.view {
++                if footerView.superview == nil {
++                    self.addSubview(footerView)
++                }
++                transition.setFrame(view: footerView, frame: footerFrame)
++            }
++
++            return CGSize(width: availableSize.width, height: footerFrame.maxY)
++        }
++    }
++
++    func makeView() -> View {
++        return View(frame: .zero)
++    }
++
++    func update(view: View, availableSize: CGSize, state: EmptyComponentState, environment: Environment<Empty>, transition: ComponentTransition) -> CGSize {
++        return view.update(component: self, availableSize: availableSize, transition: transition)
++    }
++}
++
++// MARK: - Gift header ("Timeless Book #59,153 · Owned by …")
++
++/// Replaces the recipient card once a gift has been chosen. Same pill geometry as `WalletSendRecipientComponent`.
++final class WalletSendGiftHeaderComponent: Component {
++    let context: AccountContext
++    let theme: PresentationTheme
++    let strings: PresentationStrings
++    let dateTimeFormat: PresentationDateTimeFormat
++    let peer: EnginePeer
++    let gift: StarGift.UniqueGift
++    let openGift: () -> Void
++
++    init(
++        context: AccountContext,
++        theme: PresentationTheme,
++        strings: PresentationStrings,
++        dateTimeFormat: PresentationDateTimeFormat,
++        peer: EnginePeer,
++        gift: StarGift.UniqueGift,
++        openGift: @escaping () -> Void
++    ) {
++        self.context = context
++        self.theme = theme
++        self.strings = strings
++        self.dateTimeFormat = dateTimeFormat
++        self.peer = peer
++        self.gift = gift
++        self.openGift = openGift
++    }
++
++    static func ==(lhs: WalletSendGiftHeaderComponent, rhs: WalletSendGiftHeaderComponent) -> Bool {
++        if lhs.context !== rhs.context {
++            return false
++        }
++        if lhs.theme !== rhs.theme {
++            return false
++        }
++        if lhs.peer != rhs.peer {
++            return false
++        }
++        if lhs.gift != rhs.gift {
++            return false
++        }
++        return true
++    }
++
++    final class View: UIView {
++        private let backgroundView = UIView()
++        private let icon = ComponentView<Empty>()
++        private let title = ComponentView<Empty>()
++        private let number = ComponentView<Empty>()
++        private let ownedBy = ComponentView<Empty>()
++        private let avatar = ComponentView<Empty>()
++        private let ownerName = ComponentView<Empty>()
++        private let infoButton = ComponentView<Empty>()
++
++        override init(frame: CGRect) {
++            super.init(frame: frame)
++            self.addSubview(self.backgroundView)
++        }
++
++        required init?(coder: NSCoder) {
++            fatalError("init(coder:) has not been implemented")
++        }
++
++        func update(component: WalletSendGiftHeaderComponent, availableSize: CGSize, transition: ComponentTransition) -> CGSize {
++            let size = CGSize(width: availableSize.width, height: 63.0)
++            self.backgroundView.backgroundColor = component.theme.list.itemInputField.backgroundColor
++            self.backgroundView.layer.cornerRadius = size.height / 2.0
++            transition.setFrame(view: self.backgroundView, frame: CGRect(origin: .zero, size: size))
++
++            let iconSize = CGSize(width: 40.0, height: 40.0)
++            let _ = self.icon.update(
++                transition: transition,
++                component: AnyComponent(GiftItemComponent(
++                    context: component.context,
++                    theme: component.theme,
++                    strings: component.strings,
++                    peer: nil,
++                    subject: .uniqueGift(gift: component.gift, price: nil),
++                    mode: .tableIcon
++                )),
++                environment: {},
++                containerSize: iconSize
++            )
++            if let iconView = self.icon.view {
++                if iconView.superview == nil {
++                    self.addSubview(iconView)
++                }
++                transition.setFrame(view: iconView, frame: CGRect(origin: CGPoint(x: 14.0, y: floorToScreenPixels((size.height - iconSize.height) / 2.0)), size: iconSize))
++            }
++
++            let textOriginX: CGFloat = 64.0
++            let textWidth = size.width - textOriginX - 52.0
++
++            let titleSize = self.title.update(
++                transition: .immediate,
++                component: AnyComponent(MultilineTextComponent(
++                    text: .plain(NSAttributedString(string: component.gift.title, font: Font.semibold(16.0), textColor: component.theme.list.itemPrimaryTextColor)),
++                    maximumNumberOfLines: 1
++                )),
++                environment: {},
++                containerSize: CGSize(width: textWidth * 0.7, height: 22.0)
++            )
++            let numberSize = self.number.update(
++                transition: .immediate,
++                component: AnyComponent(MultilineTextComponent(
++                    text: .plain(NSAttributedString(string: "#\(formatCollectibleNumber(component.gift.number, dateTimeFormat: component.dateTimeFormat))", font: Font.regular(16.0), textColor: component.theme.list.itemSecondaryTextColor)),
++                    maximumNumberOfLines: 1
++                )),
++                environment: {},
++                containerSize: CGSize(width: textWidth - titleSize.width - 6.0, height: 22.0)
++            )
++            let line1Y: CGFloat = 11.0
++            if let view = self.title.view {
++                if view.superview == nil {
++                    self.addSubview(view)
++                }
++                transition.setFrame(view: view, frame: CGRect(origin: CGPoint(x: textOriginX, y: line1Y), size: titleSize))
++            }
++            if let view = self.number.view {
++                if view.superview == nil {
++                    self.addSubview(view)
++                }
++                transition.setFrame(view: view, frame: CGRect(origin: CGPoint(x: textOriginX + titleSize.width + 6.0, y: line1Y), size: numberSize))
++            }
++
++            let secondaryFont = Font.regular(14.0)
++            let ownedBySize = self.ownedBy.update(
++                transition: .immediate,
++                component: AnyComponent(MultilineTextComponent(
++                    text: .plain(NSAttributedString(string: component.strings.Wallet_Send_Offer_OwnedBy, font: secondaryFont, textColor: component.theme.list.itemSecondaryTextColor)),
++                    maximumNumberOfLines: 1
++                )),
++                environment: {},
++                containerSize: CGSize(width: textWidth, height: 20.0)
++            )
++            let avatarSize = CGSize(width: 18.0, height: 18.0)
++            let _ = self.avatar.update(
++                transition: .immediate,
++                component: AnyComponent(AvatarComponent(context: component.context, theme: component.theme, peer: component.peer, size: avatarSize)),
++                environment: {},
++                containerSize: avatarSize
++            )
++            var ownerString = component.peer.compactDisplayTitle
++            if let addressName = component.peer.addressName, !addressName.isEmpty {
++                ownerString += " @\(addressName)"
++            }
++            let ownerNameSize = self.ownerName.update(
++                transition: .immediate,
++                component: AnyComponent(MultilineTextComponent(
++                    text: .plain(NSAttributedString(string: ownerString, font: secondaryFont, textColor: component.theme.list.itemSecondaryTextColor)),
++                    maximumNumberOfLines: 1
++                )),
++                environment: {},
++                containerSize: CGSize(width: textWidth - ownedBySize.width - avatarSize.width - 10.0, height: 20.0)
++            )
++            let line2Y = line1Y + titleSize.height + 2.0
++            if let view = self.ownedBy.view {
++                if view.superview == nil {
++                    self.addSubview(view)
++                }
++                transition.setFrame(view: view, frame: CGRect(origin: CGPoint(x: textOriginX, y: line2Y), size: ownedBySize))
++            }
++            if let view = self.avatar.view {
++                if view.superview == nil {
++                    self.addSubview(view)
++                }
++                transition.setFrame(view: view, frame: CGRect(origin: CGPoint(x: textOriginX + ownedBySize.width + 5.0, y: line2Y + floorToScreenPixels((ownedBySize.height - avatarSize.height) / 2.0)), size: avatarSize))
++            }
++            if let view = self.ownerName.view {
++                if view.superview == nil {
++                    self.addSubview(view)
++                }
++                transition.setFrame(view: view, frame: CGRect(origin: CGPoint(x: textOriginX + ownedBySize.width + avatarSize.width + 10.0, y: line2Y), size: ownerNameSize))
++            }
++
++            let infoButtonSize = self.infoButton.update(
++                transition: .immediate,
++                component: AnyComponent(PlainButtonComponent(
++                    content: AnyComponent(BundleIconComponent(
++                        name: "Wallet/CardInfo",
++                        tintColor: component.theme.list.itemAccentColor,
++                        maxSize: CGSize(width: 24.0, height: 24.0)
++                    )),
++                    minSize: CGSize(width: 44.0, height: 44.0),
++                    action: component.openGift
++                )),
++                environment: {},
++                containerSize: CGSize(width: 44.0, height: 44.0)
++            )
++            if let view = self.infoButton.view {
++                if view.superview == nil {
++                    self.addSubview(view)
++                }
++                transition.setFrame(view: view, frame: CGRect(origin: CGPoint(x: size.width - 6.0 - infoButtonSize.width, y: floorToScreenPixels((size.height - infoButtonSize.height) / 2.0)), size: infoButtonSize))
++            }
++
++            return size
++        }
++    }
++
++    func makeView() -> View {
++        return View(frame: .zero)
++    }
++
++    func update(view: View, availableSize: CGSize, state: EmptyComponentState, environment: Environment<Empty>, transition: ComponentTransition) -> CGSize {
++        return view.update(component: self, availableSize: availableSize, transition: transition)
++    }
++}
+diff --git a/submodules/TelegramUI/Components/Wallet/WalletSendScreen/Sources/WalletSendScreen.swift b/submodules/TelegramUI/Components/Wallet/WalletSendScreen/Sources/WalletSendScreen.swift
+index 4e19c81..5611d52 100644
+--- a/submodules/TelegramUI/Components/Wallet/WalletSendScreen/Sources/WalletSendScreen.swift
++++ b/submodules/TelegramUI/Components/Wallet/WalletSendScreen/Sources/WalletSendScreen.swift
+@@ -28,6 +28,9 @@ import WalletAuthorizationUI
+ import PasscodeCore
+ import QrCodeUI
+ import UndoUI
++import GiftItemComponent
++import BalanceNeededScreen
++import ChatMessagePaymentAlertController
+ 
+ private enum WalletSendAmountSource: Equatable {
+     case manual
+@@ -660,6 +663,19 @@ private final class WalletSendScreenComponent: Component {
+         private var recipientPublicKey: Data?
+         private var initialAddress: String?
+ 
++        // MARK: Make an Offer
++        private var offerPhase: WalletSendOfferPhase = .none
++        private var offerGiftsLoader: WalletSendOfferableGiftsLoader?
++        private var offerableGifts: [StarGift.UniqueGift] = []
++        private var offerGiftsLoaded = false
++        private var offerTonBalance: Int64?
++        private let offerTonBalanceDisposable = MetaDisposable()
++        private let offerSubmitDisposable = MetaDisposable()
++        private var isSubmittingOffer = false
++        private let giftPicker = ComponentView<Empty>()
++        private let giftHeader = ComponentView<Empty>()
++        private let offerNote = ComponentView<Empty>()
++
+         private func currentPresentationData(for component: WalletSendScreenComponent) -> (initial: PresentationData, signal: Signal<PresentationData, NoError>) {
+             let presentationData = component.updatedPresentationData.initial
+             return (
+@@ -759,6 +775,8 @@ private final class WalletSendScreenComponent: Component {
+         }
+ 
+         deinit {
++            self.offerTonBalanceDisposable.dispose()
++            self.offerSubmitDisposable.dispose()
+             self.openingDisplayLink?.invalidate()
+             self.restorationSession?.invalidate()
+             self.commentEnvironmentDisposable.dispose()
+@@ -1431,6 +1449,23 @@ private final class WalletSendScreenComponent: Component {
+                     }
+                 )))
+             }
++            // Only offered when the recipient shows at least one collectible gift that accepts offers.
++            if component.peer != nil, !self.offerPhase.isActive, !self.offerableGifts.isEmpty {
++                items.append(.action(ContextMenuActionItem(
++                    text: strings.Wallet_Send_MakeOffer,
++                    badge: ContextMenuActionBadge(value: strings.Wallet_Send_MakeOffer_New, color: .accent, style: .label),
++                    icon: { theme in
++                        return generateTintedImage(
++                            image: UIImage(bundleImageName: "Chat/Context Menu/Gift"),
++                            color: theme.contextMenu.primaryColor
++                        )
++                    },
++                    action: { [weak self] _, dismiss in
++                        dismiss(.default)
++                        self?.openMakeOffer()
++                    }
++                )))
++            }
+             let contextController = makeContextController(
+                 presentationData: self.currentPresentationData(for: component).initial,
+                 source: .reference(WalletSendContextReferenceContentSource(sourceView: sourceView)),
+@@ -1440,6 +1475,169 @@ private final class WalletSendScreenComponent: Component {
+             controller.presentInGlobalOverlay(contextController)
+         }
+ 
++        // MARK: - Make an Offer
++
++        private func setupGiftOffersIfNeeded(component: WalletSendScreenComponent) {
++            guard self.offerGiftsLoader == nil, let peer = component.peer, peer.id != component.context.account.peerId, case .user = peer else {
++                return
++            }
++            let loader = WalletSendOfferableGiftsLoader(context: component.context, peerId: peer.id)
++            loader.updated = { [weak self] state in
++                guard let self else { return }
++                self.offerableGifts = state.gifts
++                self.offerGiftsLoaded = state.isLoaded
++                if !self.isUpdating {
++                    self.requestUpdate(transition: .easeInOut(duration: 0.2))
++                }
++            }
++            self.offerGiftsLoader = loader
++
++            if let tonContext = component.context.tonContext {
++                self.offerTonBalanceDisposable.set((tonContext.state
++                |> deliverOnMainQueue).start(next: { [weak self] state in
++                    guard let self else { return }
++                    self.offerTonBalance = state?.balance.value
++                    if self.offerPhase.isActive, !self.isUpdating {
++                        self.requestUpdate(transition: .easeInOut(duration: 0.2))
++                    }
++                }))
++            }
++        }
++
++        private func openMakeOffer() {
++            guard !self.offerableGifts.isEmpty else {
++                return
++            }
++            Haptics.hit(0.4)
++            self.amountField.endEditing(true)
++            // Nothing is preselected: the button reads "Select a Gift" (disabled) until a tile is tapped.
++            self.offerPhase = .pickingGift(selected: nil)
++            self.requestUpdate(transition: .spring(duration: 0.45))
++        }
++
++        private func confirmOfferGift() {
++            guard case let .pickingGift(selected) = self.offerPhase, let gift = selected else {
++                return
++            }
++            Haptics.hit(0.6)
++            self.offerPhase = .gift(gift)
++            self.amount = 0
++            self.amountField.setAmount(0)
++            self.hasActivatedAmountInput = true
++            self.expandAttachmentMenuForInput()
++            self.requestUpdate(transition: .spring(duration: 0.45))
++            DispatchQueue.main.async { [weak self] in
++                self?.amountField.activateInput()
++            }
++        }
++
++        private func offerGoBack() {
++            switch self.offerPhase {
++            case .none:
++                return
++            case .pickingGift:
++                self.offerPhase = .none
++            case let .gift(gift):
++                self.amountField.endEditing(true)
++                self.offerPhase = .pickingGift(selected: gift)
++            }
++            self.requestUpdate(transition: .spring(duration: 0.45))
++        }
++
++        private func openOfferGift(_ gift: StarGift.UniqueGift) {
++            guard let component = self.component, let controller = self.environment?.controller() else {
++                return
++            }
++            let giftController = component.context.sharedContext.makeGiftViewScreen(context: component.context, gift: gift, shareStory: nil, openChatTheme: nil, dismissed: nil)
++            if let parentController = (controller as? AttachmentContainable)?.parentController() {
++                parentController.push(giftController)
++            } else {
++                controller.push(giftController)
++            }
++        }
++
++        private func openGramTopUp(needed: StarsAmount?) {
++            guard let component = self.component, let controller = self.environment?.controller() else {
++                return
++            }
++            var fragmentUrl = "https://fragment.com/ads/topup"
++            if let data = component.context.currentAppConfiguration.with({ $0 }).data, let value = data["ton_topup_url"] as? String {
++                fragmentUrl = value
++            }
++            if let needed {
++                controller.push(BalanceNeededScreen(
++                    context: component.context,
++                    amount: needed,
++                    buttonAction: {
++                        component.context.sharedContext.applicationBindings.openUrl(fragmentUrl)
++                    }
++                ))
++            } else {
++                component.context.sharedContext.applicationBindings.openUrl(fragmentUrl)
++            }
++        }
++
++        private func submitOffer(allowPaidStars: Int64?) {
++            guard let component = self.component, let peer = component.peer, case let .gift(gift) = self.offerPhase,
++                  self.amount > 0, !self.isSubmittingOffer else {
++                return
++            }
++            self.isSubmittingOffer = true
++            Haptics.hit(0.95)
++            self.requestUpdate(transition: .immediate)
++
++            let presentationData = self.currentPresentationData(for: component).initial
++            self.offerSubmitDisposable.set((walletSendCommitGiftOffer(
++                context: component.context,
++                peer: peer,
++                gift: gift,
++                amountNanograms: self.amount,
++                comment: self.comment,
++                allowPaidStars: allowPaidStars
++            )
++            |> deliverOnMainQueue).start(next: { [weak self] result in
++                guard let self, let controller = self.environment?.controller() else {
++                    return
++                }
++                switch result {
++                case .sent:
++                    Queue.mainQueue().after(2.5) {
++                        component.context.tonContext?.load(force: true)
++                    }
++                    component.completed?()
++                    self.dismiss()
++                case let .needsPaidMessageConfirmation(price):
++                    self.isSubmittingOffer = false
++                    self.requestUpdate(transition: .immediate)
++                    let alertController = chatMessagePaymentAlertController(
++                        context: nil,
++                        presentationData: presentationData,
++                        updatedPresentationData: nil,
++                        peers: [EngineRenderedPeer(peer: peer)],
++                        count: 1,
++                        amount: price,
++                        totalAmount: nil,
++                        hasCheck: false,
++                        navigationController: controller.navigationController as? NavigationController,
++                        completion: { [weak self] _ in
++                            self?.submitOffer(allowPaidStars: price.value)
++                        }
++                    )
++                    controller.present(alertController, in: .window(.root))
++                case let .insufficientBalance(needed):
++                    self.isSubmittingOffer = false
++                    self.requestUpdate(transition: .immediate)
++                    self.openGramTopUp(needed: needed)
++                case .failed:
++                    self.isSubmittingOffer = false
++                    self.amountField.layer.addShakeAnimation()
++                    Haptics.refuse()
++                    self.requestUpdate(transition: .immediate)
++                    controller.present(textAlertController(context: component.context, updatedPresentationData: self.currentPresentationData(for: component), title: nil, text: presentationData.strings.Wallet_Send_Offer_Error, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_OK, action: {})]), in: .window(.root))
++                }
++            }))
++        }
++
+         private func validateTransferAmount() -> Bool {
+             guard let component = self.component, self.amount > 0 else {
+                 return true
+@@ -1996,6 +2194,14 @@ private final class WalletSendScreenComponent: Component {
+                 self.needsAmountFocus = !isInAttachmentMenu && (component.peer != nil || !component.initialAddress.isEmpty)
+             }
+ 
++            if peerChanged {
++                self.offerPhase = .none
++                self.offerGiftsLoader = nil
++                self.offerableGifts = []
++                self.offerGiftsLoaded = false
++            }
++            self.setupGiftOffersIfNeeded(component: component)
++
+             if !self.didApplyInitialAmount {
+                 self.didApplyInitialAmount = true
+                 if let amount = component.initialAmountNanograms {
+@@ -2096,7 +2302,7 @@ private final class WalletSendScreenComponent: Component {
+                 self.resolvePeerAddressIfNeeded()
+             }
+             self.updateFeePreparation()
+-            let isAmountInputEnabled = !self.isPreparingTransfer && !self.isResolvingSigningAccess && !self.isSubmittingTransfer
++            let isAmountInputEnabled = !self.isPreparingTransfer && !self.isResolvingSigningAccess && !self.isSubmittingTransfer && !self.isSubmittingOffer
+             self.amountField.isUserInteractionEnabled = isAmountInputEnabled
+ 
+             let theme = environment.theme
+@@ -2115,12 +2321,16 @@ private final class WalletSendScreenComponent: Component {
+                     leftItem: GlassControlPanelComponent.Item(
+                         items: [
+                             GlassControlGroupComponent.Item(
+-                                id: AnyHashable("close"),
+-                                content: .icon("Navigation/Close"),
++                                id: AnyHashable(self.offerPhase.isActive ? "back" : "close"),
++                                content: .icon(self.offerPhase.isActive ? "Navigation/Back" : "Navigation/Close"),
+                                 action: { [weak self] in
+                                     guard let self else { return }
+                                     Haptics.hit(0.4)
+-                                    self.dismiss()
++                                    if self.offerPhase.isActive {
++                                        self.offerGoBack()
++                                    } else {
++                                        self.dismiss()
++                                    }
+                                 }
+                             )
+                         ],
+@@ -2169,7 +2379,7 @@ private final class WalletSendScreenComponent: Component {
+                 transition: transition,
+                 component: AnyComponent(MultilineTextComponent(
+                     text: .plain(NSAttributedString(
+-                        string: environment.strings.Wallet_Send_Title,
++                        string: self.offerPhase.isActive ? environment.strings.Wallet_Send_Offer_Title : environment.strings.Wallet_Send_Title,
+                         font: Font.semibold(17.0),
+                         textColor: theme.list.itemPrimaryTextColor
+                     )),
+@@ -2195,7 +2405,17 @@ private final class WalletSendScreenComponent: Component {
+             }
+ 
+             var recipientFrame: CGRect?
+-            if !isLandscape && (component.peer != nil || !self.recipientAddress.isEmpty) {
++            var isPickingGift = false
++            var offerGift: StarGift.UniqueGift?
++            switch self.offerPhase {
++            case .none:
++                break
++            case .pickingGift:
++                isPickingGift = true
++            case let .gift(gift):
++                offerGift = gift
++            }
++            if !isLandscape && offerGift == nil && (component.peer != nil || !self.recipientAddress.isEmpty) {
+                 let presentationData = component.context.sharedContext.currentPresentationData.with { $0 }
+                 let recipientSize = self.recipient.update(
+                     transition: transition,
+@@ -2248,7 +2468,85 @@ private final class WalletSendScreenComponent: Component {
+                 transition.setAlpha(view: recipientView, alpha: 0.0)
+             }
+ 
+-            let isKeyboardVisible = !isInAttachmentMenu || self.hasActivatedAmountInput
++            // Make an Offer: the chosen gift takes the recipient card's place.
++            if let offerGift, let peer = component.peer {
++                let giftHeaderSize = self.giftHeader.update(
++                    transition: transition,
++                    component: AnyComponent(WalletSendGiftHeaderComponent(
++                        context: component.context,
++                        theme: theme,
++                        strings: environment.strings,
++                        dateTimeFormat: environment.dateTimeFormat,
++                        peer: peer,
++                        gift: offerGift,
++                        openGift: { [weak self] in
++                            self?.openOfferGift(offerGift)
++                        }
++                    )),
++                    environment: {},
++                    containerSize: CGSize(width: controlButtonsWidth, height: 63.0)
++                )
++                let giftHeaderFrame = CGRect(x: environment.safeInsets.left + 16.0, y: headerOriginY + headerButtonSize.height + 14.0, width: giftHeaderSize.width, height: giftHeaderSize.height)
++                recipientFrame = giftHeaderFrame
++                if let giftHeaderView = self.giftHeader.view {
++                    if giftHeaderView.superview == nil {
++                        giftHeaderView.alpha = 0.0
++                        self.addSubview(giftHeaderView)
++                        giftHeaderView.frame = giftHeaderFrame
++                    }
++                    giftHeaderView.isUserInteractionEnabled = true
++                    transition.setFrame(view: giftHeaderView, frame: giftHeaderFrame)
++                    transition.setAlpha(view: giftHeaderView, alpha: 1.0)
++                }
++            } else if let giftHeaderView = self.giftHeader.view {
++                giftHeaderView.isUserInteractionEnabled = false
++                transition.setAlpha(view: giftHeaderView, alpha: 0.0)
++            }
++
++            // Make an Offer: "GIFTS ON PROFILE" grid shown under the recipient card.
++            if isPickingGift, let peer = component.peer {
++                let pickerOriginY = (recipientFrame?.maxY ?? (headerOriginY + headerButtonSize.height)) + 20.0
++                let pickerAvailableHeight = availableSize.height - environment.additionalInsets.bottom - environment.safeInsets.bottom - 68.0 - pickerOriginY - 16.0
++                let pickerSize = self.giftPicker.update(
++                    transition: transition,
++                    component: AnyComponent(WalletSendGiftPickerComponent(
++                        context: component.context,
++                        theme: theme,
++                        strings: environment.strings,
++                        dateTimeFormat: environment.dateTimeFormat,
++                        peer: peer,
++                        gifts: self.offerableGifts,
++                        isLoading: !self.offerGiftsLoaded,
++                        selectedGiftId: self.offerPhase.selectedGift?.id,
++                        selectGift: { [weak self] gift in
++                            guard let self else { return }
++                            self.offerPhase = .pickingGift(selected: gift)
++                            self.requestUpdate(transition: .spring(duration: 0.35))
++                        },
++                        loadMore: { [weak self] in
++                            self?.offerGiftsLoader?.loadMore()
++                        }
++                    )),
++                    environment: {},
++                    containerSize: CGSize(width: availableSize.width, height: max(120.0, pickerAvailableHeight))
++                )
++                let pickerFrame = CGRect(x: 0.0, y: pickerOriginY, width: pickerSize.width, height: pickerSize.height)
++                if let pickerView = self.giftPicker.view {
++                    if pickerView.superview == nil {
++                        pickerView.alpha = 0.0
++                        self.addSubview(pickerView)
++                        pickerView.frame = pickerFrame.offsetBy(dx: availableSize.width * 0.3, dy: 0.0)
++                    }
++                    pickerView.isUserInteractionEnabled = true
++                    transition.setFrame(view: pickerView, frame: pickerFrame)
++                    transition.setAlpha(view: pickerView, alpha: 1.0)
++                }
++            } else if let pickerView = self.giftPicker.view {
++                pickerView.isUserInteractionEnabled = false
++                transition.setAlpha(view: pickerView, alpha: 0.0)
++            }
++
++            let isKeyboardVisible = !isPickingGift && (!isInAttachmentMenu || self.hasActivatedAmountInput)
+             let keyboardSize = self.keyboard.update(
+                 transition: transition,
+                 component: AnyComponent(WalletSendKeyboardComponent(
+@@ -2297,11 +2595,12 @@ private final class WalletSendScreenComponent: Component {
+             }
+             let usableBottom = isKeyboardVisible ? keyboardFrame.minY : availableSize.height - environment.additionalInsets.bottom - environment.safeInsets.bottom
+             let hasAmount = self.amount > 0
++            let effectiveBalance = offerGift != nil ? self.offerTonBalance : self.walletBalance
+             let isInsufficient = hasAmount
+-                && !self.walletIsLoading
+-                && self.walletBalance.map { self.amount > $0 } == true
++                && (offerGift != nil || !self.walletIsLoading)
++                && effectiveBalance.map { self.amount > $0 } == true
+             let feeDisplayState = self.feeDisplayState
+-            let showFees = feeDisplayState != .hidden
++            let showFees = feeDisplayState != .hidden && !self.offerPhase.isActive
+             let feeVisibilityChanged = self.previousFeeDisplayState.map { ($0 != .hidden) != showFees } ?? false
+             var contentPositionTransition = transition
+             var contentVisibilityTransition = transition
+@@ -2318,8 +2617,8 @@ private final class WalletSendScreenComponent: Component {
+             }
+             self.previousIsInsufficient = isInsufficient
+             self.previousFeeDisplayState = feeDisplayState
+-            let hasPositiveBalance = self.walletBalance.map { $0 > 0 } == true
+-            let hasZeroBalance = self.walletBalance == 0
++            let hasPositiveBalance = effectiveBalance.map { $0 > 0 } == true
++            let hasZeroBalance = effectiveBalance == 0
+             let sendButtonY = usableBottom - 68.0
+             let showSendButton = hasAmount || component.peer != nil || !component.initialAddress.isEmpty
+             let showBalance = (hasAmount || hasPositiveBalance) && !hasZeroBalance
+@@ -2500,7 +2799,12 @@ private final class WalletSendScreenComponent: Component {
+                     content: AnyComponent(HStack(depositItems, spacing: 3.0)),
+                     minSize: CGSize(width: isDepositInline ? 0.0 : availableSize.width - 32.0, height: 40.0),
+                     action: { [weak self] in
+-                        self?.openReceive()
++                        guard let self else { return }
++                        if self.offerPhase.isActive {
++                            self.openGramTopUp(needed: nil)
++                        } else {
++                            self.openReceive()
++                        }
+                     },
+                     isEnabled: showDeposit
+                 )),
+@@ -2636,7 +2940,7 @@ private final class WalletSendScreenComponent: Component {
+             }
+ 
+             let formattedBalance: String
+-            if let balance = self.walletBalance {
++            if let balance = effectiveBalance {
+                 formattedBalance = formatTonAmountText(
+                     balance,
+                     dateTimeFormat: environment.dateTimeFormat,
+@@ -2807,7 +3111,18 @@ private final class WalletSendScreenComponent: Component {
+ 
+             let sendTitle: String
+             let sendTitlePrefix: String?
+-            if component.peer == nil {
++            if case let .pickingGift(selected) = self.offerPhase {
++                sendTitle = selected.map { environment.strings.Wallet_Send_Offer_OfferOnGift($0.title).string } ?? environment.strings.Wallet_Send_Offer_PickGift
++                sendTitlePrefix = nil
++            } else if offerGift != nil {
++                let formattedTitle = environment.strings.Wallet_Send_Offer_OfferAmount(amountTitle)
++                sendTitle = formattedTitle.string
++                if let amountRange = formattedTitle.ranges.first(where: { $0.index == 0 }) {
++                    sendTitlePrefix = (formattedTitle.string as NSString).substring(to: amountRange.range.location)
++                } else {
++                    sendTitlePrefix = nil
++                }
++            } else if component.peer == nil {
+                 sendTitle = environment.strings.Wallet_Continue
+                 sendTitlePrefix = nil
+             } else {
+@@ -2833,7 +3148,13 @@ private final class WalletSendScreenComponent: Component {
+                 }
+             }
+             let hasRecipient = !self.recipientAddress.isEmpty
+-            let canSend = hasAmount
++            let canSendOffer: Bool
++            if isPickingGift {
++                canSendOffer = self.offerPhase.selectedGift != nil
++            } else {
++                canSendOffer = hasAmount && !self.isSubmittingOffer
++            }
++            let canSend = self.offerPhase.isActive ? canSendOffer : hasAmount
+                 && hasRecipient
+                 && !self.isPreparingTransfer
+                 && !self.isSubmittingTransfer
+@@ -2865,9 +3186,17 @@ private final class WalletSendScreenComponent: Component {
+                         ))
+                     ),
+                     isEnabled: canSend,
+-                    displaysProgress: self.isResolvingSigningAccess || self.isPreparingTransfer || self.isSubmittingTransfer,
++                    displaysProgress: self.isResolvingSigningAccess || self.isPreparingTransfer || self.isSubmittingTransfer || self.isSubmittingOffer,
+                     action: { [weak self] in
+-                        self?.send()
++                        guard let self else { return }
++                        switch self.offerPhase {
++                        case .none:
++                            self.send()
++                        case .pickingGift:
++                            self.confirmOfferGift()
++                        case .gift:
++                            self.submitOffer(allowPaidStars: nil)
++                        }
+                     }
+                 )),
+                 environment: {},
+@@ -2890,7 +3219,49 @@ private final class WalletSendScreenComponent: Component {
+                     )
+                 )
+                 transition.setAlpha(view: sendButtonView, alpha: showSendButton ? 1.0 : 0.0)
+-                sendButtonView.isUserInteractionEnabled = hasAmount
++                sendButtonView.isUserInteractionEnabled = hasAmount || isPickingGift
++            }
++
++            // Make an Offer: hide the amount stack while the gift grid is on screen,
++            // and show the escrow note above the balance once a gift is chosen.
++            // amountField's alpha isn't driven anywhere else, so it is restored here;
++            // the other views get their alpha re-applied by their own layout code above.
++            transition.setAlpha(view: self.amountField, alpha: isPickingGift ? 0.0 : 1.0)
++            self.rateButton.isUserInteractionEnabled = !isPickingGift
++            self.depositButton.view?.isUserInteractionEnabled = !isPickingGift
++            if isPickingGift {
++                self.amountField.isUserInteractionEnabled = false
++                self.commentBackgroundView.isUserInteractionEnabled = false
++                let amountStackViews: [UIView?] = [self.rateButton, self.emptyHint.view, self.balanceText.view, self.feeText.view, self.insufficientText.view, self.depositButton.view, self.commentBackgroundView]
++                for case let view? in amountStackViews {
++                    transition.setAlpha(view: view, alpha: 0.0)
++                }
++            }
++            if offerGift != nil, let peer = component.peer {
++                let noteSize = self.offerNote.update(
++                    transition: .immediate,
++                    component: AnyComponent(MultilineTextComponent(
++                        text: .plain(NSAttributedString(
++                            string: environment.strings.Wallet_Send_Offer_EscrowNote(peer.compactDisplayTitle).string,
++                            font: Font.regular(13.0),
++                            textColor: theme.list.itemSecondaryTextColor
++                        )),
++                        horizontalAlignment: .center,
++                        maximumNumberOfLines: 2
++                    )),
++                    environment: {},
++                    containerSize: CGSize(width: availableSize.width - 64.0, height: 40.0)
++                )
++                if let noteView = self.offerNote.view {
++                    if noteView.superview == nil {
++                        noteView.alpha = 0.0
++                        self.addSubview(noteView)
++                    }
++                    transition.setFrame(view: noteView, frame: CGRect(x: floorToScreenPixels((availableSize.width - noteSize.width) / 2.0), y: balanceSlotY - noteSize.height - 8.0, width: noteSize.width, height: noteSize.height))
++                    transition.setAlpha(view: noteView, alpha: 1.0)
++                }
++            } else if let noteView = self.offerNote.view {
++                transition.setAlpha(view: noteView, alpha: 0.0)
+             }
+ 
+             if let keyboardView = self.keyboard.view {
+-- 
+2.43.0
+
